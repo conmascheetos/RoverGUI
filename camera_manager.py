@@ -45,6 +45,13 @@ class Camera:
         self.fps: int = camera_fps
         self.is_running: bool = False
 
+        """
+        Set the encoding quality for each frame that is sent to a client.
+        Although this is a list, it represents a key-value pair (WHY OPENCV?!).
+        90 is our default value, but it can range between 0-100 with 100 meaning that quality of the frame is maintained.
+        """
+        self.encoding_params: list[int] = [cv2.IMWRITE_JPEG_QUALITY, 50]
+
 class CameraManger:
     """
     Camera Manager manages a list of currently connected USB cameras (at instantiation)
@@ -91,6 +98,22 @@ class CameraManger:
         # TODO: Raise error if camera not found
         camera = self.__get_camera(camera_name)
         camera.fps = fps
+
+    def get_camera_encoding_params(self, camera_name: str):
+        """
+        Return the encoding parameters given a camera name
+        """
+        # TODO: Raise error if camera not found
+        camera = self.__get_camera(camera_name)
+        return camera.encoding_params
+        
+    def set_camera_encoding_params(self, camera_name: str, encoding_quality: int):
+        """
+        Set the camera encoding parameters given a camera name
+        """
+        # TODO: Raise error if camera not found
+        camera = self.__get_camera(camera_name)
+        camera.encoding_params[1] = encoding_quality
 
     def camera_is_running(self, camera_name: str) -> bool:
         """

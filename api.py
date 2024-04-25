@@ -46,7 +46,8 @@ def generate_frames(camera_name: str):
         
         # Check if it's time to send a frame
         if time.time() * 1000 - time_since_last_frame > wait_time:
-            ret, buffer = cv2.imencode('.jpg', frame)
+            encoding_params = camera_manager.get_camera_encoding_params(camera_name)
+            ret, buffer = cv2.imencode('.jpg', frame, encoding_params)
             frame = buffer.tobytes()
             yield (b'--frame\r\n'
                     b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
@@ -73,4 +74,12 @@ async def get_available_cameras():
 @app.post('/stream/fps/{camera_name}')
 async def set_camera_fps(camera_name: str, fps: int):
     camera_manager.set_camera_fps(camera_name, fps)
+    return True
+
+@app.post('/stream/encoding_quality/{camera_name}')
+async def set_camera_encoding_quality(camera_name: str, encoding_quality: int):
+    """
+    Change the encoding quality of a camera
+    """
+    camera_manager.set_camera_encoding_params(camera_name, encoding_quality)
     return True
