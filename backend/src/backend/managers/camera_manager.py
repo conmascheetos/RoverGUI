@@ -1,11 +1,25 @@
 import subprocess
-from time import sleep
 import cv2
 
+
 def get_camera_name_and_paths() -> dict[str: str]:
-    # Run the v4l2-ctl command to list available cameras
+    """
+    Returns a dictionary containing the camera name and its path (`/dev/videox`, etc.)
+
+    this only works on linux systems that have `v412-ctl` installed.
+
+    TODO: Replace with a Video4Linux library rather than directly parsing text
+    """
+
+    # Try to read available camera streams
+    # If no cameras are found, an error is raised which we ignore
     command = "v4l2-ctl --list-devices"
-    output = subprocess.check_output(command, shell=True, text=True)
+    output = ""
+    try:
+        output = subprocess.check_output(
+            command, shell=True, text=True)
+    except Exception as e:
+        print(f"{e}")
 
     # Create a dictionary mapping camera name to device path
     cameras = {}
@@ -26,19 +40,17 @@ def get_camera_name_and_paths() -> dict[str: str]:
         # Add camera to dictionary
         cameras[camera_name] = camera_path
 
-        print(camera_name, camera_path)
-
         # Skip over other device file paths
         while curr_line < len(lines) and lines[curr_line].startswith('/dev/'):
             curr_line += 1
     return cameras
 
 
-
 class Camera:
     """
     A representation of camera that stores information like name, camera index, etc.
     """
+
     def __init__(self, camera_name: str, camera_path: str, camera_fps: int = 30):
         self.name: str = camera_name
         self.path: str = camera_path
@@ -49,8 +61,17 @@ class Camera:
         Set the encoding quality for each frame that is sent to a client.
         Although this is a list, it represents a key-value pair (WHY OPENCV?!).
         90 is our default value, but it can range between 0-100 with 100 meaning that quality of the frame is maintained.
+        TODO: Consider other ways to compress, maybe use WebP or Pillow library
         """
-        self.encoding_params: list[int] = [cv2.IMWRITE_JPEG_QUALITY, 50]
+        self.encoding_params: list[int] = [cv2.IMWRITE_JPEG_QUALITY, 90]
+
+
+class CameraNotFoundError(Exception):
+    def __init__(self, camera_name: str):
+        self.message = f"Error: Camera with name {
+            camera_name} cannot be found."
+        super().__init__(self.message)
+
 
 class CameraManger:
     """
@@ -61,8 +82,7 @@ class CameraManger:
     def __init__(self):
         # List of available cameras
         self.cameras: list[Camera] = self.__create_cameras()
-        
-    
+
     def __create_cameras(self) -> list[Camera]:
         """
         Create a list of cameras available on the computer
@@ -70,27 +90,31 @@ class CameraManger:
         camera_dict = get_camera_name_and_paths()
         cameras = []
         for camera_name, camera_path in camera_dict.items():
-            camera = Camera(camera_name, camera_path)
-            cameras.append(camera)
+            cameras.append(Camera(camera_name, camera_path))
         return cameras
-    
+
     def __get_camera(self, camera_name: str) -> Camera:
         """
         Get the Camera object associated with a given camera name
         """
-        # TODO: Raise error if camera not found
         for camera in self.cameras:
             if camera.name == camera_name:
                 return camera
-    
-    def get_camrea_fps(self, camera_name: str)-> int:
+
+        # Raise error if camera not found
+        raise CameraNotFoundError(camera_name)
+
+    def get_camera_fps(self, camera_name: str) -> int:
         """
         Return the fps for a camera, given a camera name
         """
         # TODO: Raise error if camera not found
-        camera = self.__get_camera(camera_name)
-        return camera.fps
-    
+        try:
+            camera = self.__get_camera(camera_name)
+            return camera.fps
+        except CameraNotFoundError:
+            print(CameraNotFoundError)
+
     def set_camera_fps(self, camera_name: str, fps: int):
         """
         Change the fps for a camera, given a camera name and fps
@@ -106,7 +130,7 @@ class CameraManger:
         # TODO: Raise error if camera not found
         camera = self.__get_camera(camera_name)
         return camera.encoding_params
-        
+
     def set_camera_encoding_params(self, camera_name: str, encoding_quality: int):
         """
         Set the camera encoding parameters given a camera name
@@ -123,18 +147,22 @@ class CameraManger:
         camera = self.__get_camera(camera_name)
         return camera.is_running
 
-    
     def start_video_capture(self, camera_name: str) -> cv2.VideoCapture:
         """
         Given a camera name, return an openCV video capture object (to read frames)
         """
         # TODO: Raise error if camera not found
-        camera = self.__get_camera(camera_name)
+        try:
+            camera = self.__get_camera(camera_name)
+        except CameraNotFoundError as e:
+            print(e)
+            raise
+            return
         # TODO: Check if camera is already running
         cap = cv2.VideoCapture(camera.path)
         camera.is_running = True
         return cap
-    
+
     def end_video_capture(self, camera_name: str):
         """
         Set a camera to no longer run
