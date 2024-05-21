@@ -57,17 +57,20 @@ async def start_stream(camera_name: str) -> StreamingResponse:
     """
     Take in a camera name and start a video stream
     """
+    # If camera is already streaming, return bad response
+    if camera_manager.camera_is_running(camera_name):
+        raise HTTPException(
+            status_code=400, detail=f"{camera_name} is already streaming")
     try:
         # Create video capture object for camera
         cap = camera_manager.start_video_capture(camera_name)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Set camera parameters.
 
-        # Return streaming response
-        return (StreamingResponse(generate_frames(
-            cap, camera_name), media_type="multipart/x-mixed-replace; boundary=frame"))
-
     except CameraNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    # Return streaming response
+    return (StreamingResponse(generate_frames(
+        cap, camera_name), media_type="multipart/x-mixed-replace; boundary=frame"))
 
 
 @app.post("/stream/end/{camera_name}")
