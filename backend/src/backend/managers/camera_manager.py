@@ -6,7 +6,7 @@ def get_camera_name_and_paths() -> dict[str: str]:
     """
     Returns a dictionary containing the camera name and its path (`/dev/videox`, etc.)
 
-    this only works on linux systems that have `v412-ctl` installed.
+    This only works on linux systems that have `v412-ctl` installed.
 
     TODO: Replace with a Video4Linux library rather than directly parsing text
     """
@@ -108,57 +108,64 @@ class CameraManger:
         """
         Return the fps for a camera, given a camera name
         """
-        # TODO: Raise error if camera not found
         try:
             camera = self.__get_camera(camera_name)
-            return camera.fps
         except CameraNotFoundError:
-            print(CameraNotFoundError)
+            raise
+        return camera.fps
 
     def set_camera_fps(self, camera_name: str, fps: int):
         """
         Change the fps for a camera, given a camera name and fps
         """
-        # TODO: Raise error if camera not found
-        camera = self.__get_camera(camera_name)
+        try:
+            camera = self.__get_camera(camera_name)
+        except CameraNotFoundError:
+            raise
         camera.fps = fps
 
     def get_camera_encoding_params(self, camera_name: str):
         """
         Return the encoding parameters given a camera name
         """
-        # TODO: Raise error if camera not found
-        camera = self.__get_camera(camera_name)
+        try:
+            camera = self.__get_camera(camera_name)
+        except CameraNotFoundError:
+            raise
         return camera.encoding_params
 
     def set_camera_encoding_params(self, camera_name: str, encoding_quality: int):
         """
         Set the camera encoding parameters given a camera name
         """
-        # TODO: Raise error if camera not found
-        camera = self.__get_camera(camera_name)
+        try:
+            camera = self.__get_camera(camera_name)
+        except CameraNotFoundError:
+            raise
+
+        # Change quality of captured frames
         camera.encoding_params[1] = encoding_quality
 
     def camera_is_running(self, camera_name: str) -> bool:
         """
         Return True if camera stream is being asked for and False if it has been ended
         """
-        # TODO: Raise error if camera not found
-        camera = self.__get_camera(camera_name)
+        try:
+            camera = self.__get_camera(camera_name)
+        except CameraNotFoundError:
+            raise
         return camera.is_running
 
     def start_video_capture(self, camera_name: str) -> cv2.VideoCapture:
         """
         Given a camera name, return an openCV video capture object (to read frames)
         """
-        # TODO: Raise error if camera not found
         try:
             camera = self.__get_camera(camera_name)
-        except CameraNotFoundError as e:
-            print(e)
+        except CameraNotFoundError:
             raise
-            return
-        # TODO: Check if camera is already running
+
+        # Create video capture device
         cap = cv2.VideoCapture(camera.path)
         camera.is_running = True
         return cap
@@ -167,8 +174,10 @@ class CameraManger:
         """
         Set a camera to no longer run
         """
-        # TODO: Raise error if camera not found
-        camera = self.__get_camera(camera_name)
+        try:
+            camera = self.__get_camera(camera_name)
+        except CameraNotFoundError:
+            raise
         camera.is_running = False
 
     def get_available_cameras(self) -> list[str]:
