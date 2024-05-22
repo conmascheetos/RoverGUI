@@ -36,6 +36,7 @@ def generate_frames(cap: cv2.VideoCapture, camera_name: str):
             break
 
         # Check if it's time to send a frame
+        # NOTE: The time function is in millis, so x1000 makes it in seconds
         if time.time() * 1000 - time_since_last_frame > wait_time:
             # Get the encoding quality of camera
             encoding_params = camera_manager.get_camera_encoding_params(
