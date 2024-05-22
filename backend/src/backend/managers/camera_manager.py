@@ -86,6 +86,7 @@ class CameraManger:
     def __create_cameras(self) -> list[Camera]:
         """
         Create a list of cameras available on the computer
+        NOTE: Will only work on Linux
         """
         camera_dict = get_camera_name_and_paths()
         cameras = []
