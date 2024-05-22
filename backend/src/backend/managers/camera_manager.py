@@ -97,6 +97,8 @@ class CameraManger:
     def __get_camera(self, camera_name: str) -> Camera:
         """
         Get the Camera object associated with a given camera name
+
+        Raises: CameraNotFoundError if specified camera cannot be found
         """
         for camera in self.cameras:
             if camera.name == camera_name:
@@ -108,6 +110,8 @@ class CameraManger:
     def get_camera_fps(self, camera_name: str) -> int:
         """
         Return the fps for a camera, given a camera name
+
+        Raises: CameraNotFoundError if specified camera cannot be found
         """
         try:
             camera = self.__get_camera(camera_name)
@@ -118,6 +122,8 @@ class CameraManger:
     def set_camera_fps(self, camera_name: str, fps: int):
         """
         Change the fps for a camera, given a camera name and fps
+
+        Raises: CameraNotFoundError if specified camera cannot be found
         """
         try:
             camera = self.__get_camera(camera_name)
@@ -125,11 +131,12 @@ class CameraManger:
             raise
         camera.fps = fps
 
-    def get_camera_encoding_params(self, camera_name: str):
+    def get_camera_encoding_params(self, camera_name: str) -> list[int]:
         """
         Return the encoding parameters given a camera name
         Will always be in the form [Image Type (JPEG, PNG, etc.), quality of image (0-100)]
 
+        Raises: CameraNotFoundError if specified camera cannot be found
         """
         try:
             camera = self.__get_camera(camera_name)
@@ -140,6 +147,8 @@ class CameraManger:
     def set_camera_encoding_params(self, camera_name: str, encoding_quality: int):
         """
         Set the camera encoding parameters given a camera name
+
+        Raises: CameraNotFoundError if specified camera cannot be found
         """
         try:
             camera = self.__get_camera(camera_name)
@@ -152,6 +161,8 @@ class CameraManger:
     def camera_is_running(self, camera_name: str) -> bool:
         """
         Return True if camera stream is being asked for and False if it has been ended
+
+        Raises: CameraNotFoundError if specified camera cannot be found
         """
         try:
             camera = self.__get_camera(camera_name)
@@ -162,6 +173,9 @@ class CameraManger:
     def start_video_capture(self, camera_name: str) -> cv2.VideoCapture:
         """
         Given a camera name, return an openCV video capture object (to read frames)
+
+        Raises: CameraNotFoundError if specified camera cannot be found
+
         """
         try:
             camera = self.__get_camera(camera_name)
@@ -176,6 +190,8 @@ class CameraManger:
     def end_video_capture(self, camera_name: str):
         """
         Set a camera to no longer run
+
+        Raises: CameraNotFoundError if specified camera cannot be found
         """
         try:
             camera = self.__get_camera(camera_name)
