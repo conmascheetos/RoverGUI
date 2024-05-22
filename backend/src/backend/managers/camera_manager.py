@@ -189,6 +189,6 @@ class CameraManger:
         """
         available_cameras = []
         for camera in self.cameras:
-            if camera.is_running == False:
+            if not camera.is_running:
                 available_cameras.append(camera.name)
         return available_cameras
