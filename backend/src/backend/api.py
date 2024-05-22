@@ -23,6 +23,9 @@ def fps_to_ms(fps: int) -> float:
 def generate_frames(cap: cv2.VideoCapture, camera_name: str):
     """
     A generator that will yield the frames for a given camera
+
+    TODO: Instead of reading frames and yielding them directly, utilize multiprocessing
+     so that each camera is running on its own process and then this loop is only grabbing from said processes queue.
     """
     # Capture video frames at specified frame rate
     time_since_last_frame = 0
