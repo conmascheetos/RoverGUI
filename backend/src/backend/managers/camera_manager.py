@@ -128,6 +128,8 @@ class CameraManger:
     def get_camera_encoding_params(self, camera_name: str):
         """
         Return the encoding parameters given a camera name
+        Will always be in the form [Image Type (JPEG, PNG, etc.), quality of image (0-100)]
+
         """
         try:
             camera = self.__get_camera(camera_name)
