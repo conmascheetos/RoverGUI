@@ -79,7 +79,7 @@ async def end_stream(camera_name: str) -> Response:
     """
     End a video a stream given a camera name
     """
-    if camera_manager.camera_is_running(camera_name) == True:
+    if camera_manager.camera_is_running(camera_name):
         camera_manager.end_video_capture(camera_name)
         return Response(status_code=200)
     else:
