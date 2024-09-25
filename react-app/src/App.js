@@ -9,7 +9,13 @@ function App() {
   //Need to create a selection of camera names to choose from, and then pass that camera name
   //to the image source to get the video feed from the server
 
-  const [cameraNames, updateCameraNames] = useState([]) //getting available devices from server
+  /*
+    human_name: string,
+    description: string,
+    misc: string,
+    index: number
+  */
+  const [cameras, setCameras] = useState([]) //getting available devices from server
 
   /*//Effect to get the camera names from the server
   useEffect(() => {
@@ -20,17 +26,37 @@ function App() {
       })
   }, [])*/
 
-  //test data for camera names
+  // Fetch Camera(s) Information from Server
   useEffect(() => {
-    updateCameraNames([null, 'Camera 1', 'Camera 2', 'Camera 3'])
-  }, [])
+    (async () => {
+      let response = await fetch("/stream/available_cameras");
+      let cameras = await response.json();
+
+      // Move camera.index.Index to camera.index
+      cameras.filter((camera) => {
+        // Only keep cameras that have an index (non-ip cameras).
+        if (!camera.index.hasOwnProperty("Index"))
+          return false;
+
+        camera.index = camera.index.Index;
+        return true;
+      });
+      
+      setCameras(cameras);
+    })();
+  }, []);
+
+  // //test data for camera names
+  // useEffect(() => {
+  //   setCameras([null, 'Camera 1', 'Camera 2', 'Camera 3'])
+  // }, [])
 
   //On change of the camera selection, add components for camera feed and sliders
   //to control the camera feed
   const [selectedCamera, setSelectedCamera] = useState(null);
 
   const handleCameraChange = (event) => {
-    console.log(event.target.value);
+    console.log(JSON.stringify(event.target.value));
     setSelectedCamera(event.target.value);
   };
 
@@ -39,8 +65,8 @@ function App() {
       <div className="camera-select">
         <label>Select Camera: </label>
         <select onChange={handleCameraChange}>
-          {cameraNames.map((cameraName, index) => {
-            return <option key={index} value={cameraName}>{cameraName}</option>
+          {cameras.map((camera, index) => {
+            return <option key={index} value={camera.index}>{camera.human_name}</option>
           })}
         </select>
         {selectedCamera && (
