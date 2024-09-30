@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
 //filepath for testing (DELETE LATER): ../../../GitHub/Automomous/examples/ARTrackerTest/videos
@@ -9,13 +9,9 @@ function App() {
   //Need to create a selection of camera names to choose from, and then pass that camera name
   //to the image source to get the video feed from the server
 
-  /*
-    human_name: string,
-    description: string,
-    misc: string,
-    index: number
-  */
-  const [cameras, setCameras] = useState([]) //getting available devices from server
+  const [cameras, setCameras] = useState([]); //getting available devices from server
+
+  const connection = useRef(null);
 
   /*//Effect to get the camera names from the server
   useEffect(() => {
@@ -32,17 +28,7 @@ function App() {
       let response = await fetch("/stream/available_cameras");
       let cameras = await response.json();
 
-      // Move camera.index.Index to camera.index
-      cameras.filter((camera) => {
-        // Only keep cameras that have an index (non-ip cameras).
-        if (!camera.index.hasOwnProperty("Index"))
-          return false;
-
-        camera.index = camera.index.Index;
-        return true;
-      });
-      
-      setCameras(cameras);
+      setCameras(["", ...cameras]);
     })();
   }, []);
 
@@ -53,27 +39,73 @@ function App() {
 
   //On change of the camera selection, add components for camera feed and sliders
   //to control the camera feed
-  const [selectedCamera, setSelectedCamera] = useState(null);
+  const [selectedCamera, setSelectedCamera] = useState("");
 
-  const handleCameraChange = (event) => {
-    console.log(JSON.stringify(event.target.value));
-    setSelectedCamera(event.target.value);
+  const handleCameraChange = async (event) => {
+    let selectedCameraPath = event.target.value;
+
+    if (connection.current !== null)
+      connection.current.close();
+
+    if (selectedCameraPath === "")
+      return;
+
+    let peerConnection = new RTCPeerConnection();
+    peerConnection.ontrack = (e) => {
+      var el = document.createElement(e.track.kind);
+      el.srcObject = e.streams[0];
+      el.autoplay = true;
+      el.controls = true;
+    
+      document.getElementById("videoDiv").appendChild(el);
+    };
+
+    peerConnection.onicecandidate = async (e) => {
+      if (e.candidate === null || connection.current !== null)
+          return;
+      connection.current = peerConnection;
+
+      let response = await fetch(`/stream/cameras/start`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          path: selectedCameraPath,
+          offer: peerConnection.localDescription
+        })
+      });
+  
+      let remoteOffer = await response.json();
+      peerConnection.setRemoteDescription(new RTCSessionDescription(remoteOffer));
+
+      setSelectedCamera(selectedCameraPath);
+    };
+
+    peerConnection.addTransceiver("video", {"direction": "sendrecv"})
+    peerConnection.addTransceiver("audio", {"direction": "sendrecv"})
+
+    let offer = await peerConnection.createOffer();
+    peerConnection.setLocalDescription(offer);
   };
 
   return (
     <div className="App">
       <div className="camera-select">
         <label>Select Camera: </label>
-        <select onChange={handleCameraChange}>
+        <select value={selectedCamera} onChange={handleCameraChange}>
           {cameras.map((camera, index) => {
-            return <option key={index} value={camera.index}>{camera.human_name}</option>
+            return <option key={index} value={camera}>{camera}</option>
           })}
         </select>
         {selectedCamera && (
         <div>
-          <div className="camera-feed">
-            <img src={`/video_feed/${selectedCamera}`} alt="Camera Frame" width="600" height="400" />
+          <div id="videoDiv">
+
           </div>
+          {/* <div className="camera-feed">
+            <img src={`/stream/video_feed/${selectedCamera}`} alt="Camera Frame" width="600" height="400" />
+          </div> */}
           <div className="slider-container">
             <label htmlFor="fpsSlider">FPS:</label>
             <input
