@@ -1,8 +1,80 @@
 use std::{error::Error, path::Path, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread::{self}, time::Duration};
 
+use jpeg_decoder::Decoder;
+use openh264::{encoder::Encoder, formats::{RgbSliceU8, YUVBuffer}};
 use rocket::tokio::{sync::{mpsc::{self, Receiver, Sender}, Mutex, Notify}, task, time};
-use v4l::{video::{Capture, Output}, FourCC};
+use v4l::{buffer::Type, frameinterval::{FrameIntervalEnum, Stepwise}, io::traits::CaptureStream, prelude::MmapStream, video::{capture::Parameters, Capture}, Device, Format, FourCC, Fraction};
 use webrtc::{api::{interceptor_registry, media_engine::{MediaEngine, MIME_TYPE_H264}, APIBuilder, API}, ice_transport::ice_connection_state::RTCIceConnectionState, interceptor::registry::Registry, media::Sample, peer_connection::{configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState, sdp::session_description::RTCSessionDescription}, rtp_transceiver::rtp_codec::RTCRtpCodecCapability, track::track_local::{track_local_static_sample::TrackLocalStaticSample, TrackLocal}};
+
+pub struct H264CameraReader<'a> {
+    stream: MmapStream<'a>,
+    camera_mode: CameraMode,
+    h264_encoder: Encoder
+}
+
+// Heavily inspired by https://github.com/D1plo1d/h264_webcam_stream
+impl<'a> H264CameraReader<'a> {
+    pub fn new(device: &mut Device, mode: CameraMode) -> Result<Self, Box<dyn Error>> {
+        let format = Format::new(mode.width, mode.height, FourCC::new(b"MJPG"));
+        Capture::set_format(device, &format)?;
+
+        let parameters = Parameters::new(mode.frame_interval);
+        Capture::set_params(device, &parameters)?;
+
+        let stream = MmapStream::with_buffers(device, Type::VideoCapture, 4)?;
+        let encoder = Encoder::new()?;
+
+        Ok(Self { stream, camera_mode: mode, h264_encoder: encoder })
+    }
+
+    pub fn read(&mut self) -> Result<Vec<u8>, Box<dyn Error>> {
+        let (buffer, _) = self.stream.next()?; 
+        let mut jpg = Decoder::new(buffer);
+        let pixels = jpg.decode()?;
+
+        let yuv_buffer = YUVBuffer::from_rgb_source(RgbSliceU8::new(&pixels[..], (self.camera_mode.width as usize, self.camera_mode.height as usize)));
+        let bitstream = self.h264_encoder.encode(&yuv_buffer)?;
+
+        Ok(bitstream.to_vec())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CameraMode {
+    width: u32,
+    height: u32,
+    frame_interval: Fraction
+}
+
+impl ToString for CameraMode {
+    fn to_string(&self) -> String {
+        format!("{}x{} @{}fps", self.width, self.height, self.frame_interval.denominator)
+    }
+}
+
+impl CameraMode {
+    pub fn fetch_all(device: &Device) -> Result<Vec<CameraMode>, Box<dyn Error>> {
+        let mut configs: Vec<CameraMode> = Vec::new();
+        
+        let discrete_iter = Capture::enum_framesizes(device, FourCC::new(b"MJPG"))?
+            .into_iter()
+            .map(|framesize| framesize.size.to_discrete())
+            .flatten();
+
+        for discrete_frame_size in discrete_iter {
+            for interval in Capture::enum_frameintervals(device, FourCC::new(b"MJPG"), discrete_frame_size.width, discrete_frame_size.height)? {
+                let fraction = match interval.interval {
+                    FrameIntervalEnum::Discrete(fraction) => fraction,
+                    FrameIntervalEnum::Stepwise(Stepwise { min, .. }) => min
+                };
+
+                configs.push(CameraMode { width: discrete_frame_size.width, height: discrete_frame_size.height, frame_interval: fraction });
+            }
+        }
+
+        Ok(configs)
+    }
+}
 
 pub struct WebcamManager {
     camera_handles: Arc<Mutex<Vec<CameraThreadHandle>>>,
@@ -28,6 +100,10 @@ impl WebcamManager {
         })
     }
 
+    pub fn camera_handles(&self) -> Arc<Mutex<Vec<CameraThreadHandle>>> {
+        self.camera_handles.clone()
+    }
+
     pub async fn add_client(&self, camera_path: String, rtc_offer: RTCSessionDescription) -> Result<RTCSessionDescription, Box<dyn Error>> {
         let peer_connection = self.rtc_api.new_peer_connection(RTCConfiguration::default()).await?;
         let peer_connection = Arc::new(peer_connection);
@@ -48,34 +124,33 @@ impl WebcamManager {
             .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await?;
 
+        let mut rx = {
+            let camera_handles = &mut self.camera_handles.lock().await;
+            match camera_handles.iter().find(|handle| handle.camera_path == camera_path) {
+                Some(handle) => {
+                    handle.enroll_rx().await
+                },
+                None => {
+                    let handle = CameraThreadHandle::start_camera_thread(&camera_path, self.camera_handles.clone()).unwrap();
+                    let rx = handle.enroll_rx().await;
+                    
+                    camera_handles.push(handle);
+                    rx
+                },
+            }
+        };
+
         // Should drop if connection is canceled
         task::spawn(async move {
             let mut rtcp_buf = vec![0u8; 1500];
             while let Ok((_, _)) = rtp_sender.read(&mut rtcp_buf).await {}
         });
-    
-        let c_camera_handles = self.camera_handles.clone();
+
         let c_peer_disconnected = peer_disconnected.clone();
         task::spawn(async move {
             if time::timeout(Duration::from_millis(5000), notify_rx.notified()).await.is_err() {
                 return;
             }
-
-            let mut rx = {
-                let camera_handles = &mut *c_camera_handles.lock().await;
-                match camera_handles.iter().find(|handle| handle.camera_path == camera_path) {
-                    Some(handle) => {
-                        handle.enroll_rx().await
-                    },
-                    None => {
-                        let handle = CameraThreadHandle::start_camera_thread(&camera_path, c_camera_handles.clone());
-                        let rx = handle.enroll_rx().await;
-                        
-                        camera_handles.push(handle);
-                        rx
-                    },
-                }
-            };
 
             while let Some(bytes) = rx.recv().await {
                 if c_peer_disconnected.load(Ordering::SeqCst) {
@@ -127,16 +202,20 @@ impl WebcamManager {
     }
 }
 
-struct CameraThreadHandle {
+pub struct CameraThreadHandle {
     camera_path: String,
+    cam_mode_tx: Sender<CameraMode>,
+    current_mode: CameraMode,
+    camera_modes: Vec<CameraMode>,
     manual_shutdown_needed: Arc<AtomicBool>,
     sink_flush_needed: Arc<AtomicBool>,
     tx_sink: Arc<Mutex<Vec<Sender<Vec<u8>>>>>
 }
 
 impl CameraThreadHandle {
-    fn start_camera_thread(camera_path: &str, camera_handles: Arc<Mutex<Vec<CameraThreadHandle>>>) -> Self {
+    fn start_camera_thread(camera_path: &str, camera_handles: Arc<Mutex<Vec<CameraThreadHandle>>>) -> Result<Self, Box<dyn Error>> {
         let camera_path = camera_path.to_owned();
+        let (cam_mode_tx, mut cam_mode_rx) = mpsc::channel::<CameraMode>(1);
         let manual_shutdown_needed: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let sink_flush_needed: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let tx_sink: Arc<Mutex<Vec<Sender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -145,18 +224,16 @@ impl CameraThreadHandle {
         let c_manual_shutdown_needed = manual_shutdown_needed.clone();
         let c_sink_flush_needed = sink_flush_needed.clone();
         let c_tx_sink = tx_sink.clone();
+
+        let device_path = Path::new(&c_camera_path);
+        let node = v4l::context::enum_devices()
+            .into_iter()
+            .find(|node| node.path() == device_path).ok_or("V4l Node Not Found")?;
+        let mut device = Device::new(node.index())?;
+        let modes = CameraMode::fetch_all(&device)?;
+        let initial_mode = modes.last().ok_or("No Last")?.clone();
         thread::spawn(move || {
-            let device_path = Path::new(&c_camera_path);
-            let max_fps = 30;
-        
-            let mut device = h264_webcam_stream::get_device(&device_path).unwrap();
-
-            // // Used for deriving actual usable resolutions and frame rates.
-            // println!("{:?}", Capture::enum_framesizes(&device, FourCC::new(b"MJPG")).unwrap());
-            // println!("{:?}", Capture::enum_frameintervals(&device, FourCC::new(b"MJPG"), 1280, 720).unwrap());
-            
-            let mut stream = h264_webcam_stream::stream(&mut device, max_fps).unwrap();
-
+            let mut reader = H264CameraReader::new(&mut device, initial_mode).unwrap();
             let mut rtc_txs: Vec<Sender<Vec<u8>>> = Vec::new();
 
             loop {
@@ -171,11 +248,16 @@ impl CameraThreadHandle {
                         rtc_txs.push(tx);
                     }
 
-                    c_manual_shutdown_needed.store(false, Ordering::SeqCst);
+                    c_sink_flush_needed.store(false, Ordering::SeqCst);
                 }
 
-                let (bytes, _) = stream.next(false).unwrap();
-                
+                // Restart reader / stream with the new mode
+                if let Ok(mode) = cam_mode_rx.try_recv() {
+                    drop(reader);
+                    reader = H264CameraReader::new(&mut device, mode).unwrap();
+                }
+
+                let bytes = reader.read().unwrap();
                 rtc_txs.retain(|tx| {
                     tx.blocking_send(bytes.clone()).is_ok()
                 });
@@ -189,12 +271,34 @@ impl CameraThreadHandle {
             }
         });
 
-        CameraThreadHandle {
+        Ok(CameraThreadHandle {
             camera_path,
             manual_shutdown_needed,
+            cam_mode_tx,
+            current_mode: modes.last().ok_or("No Last Mode")?.clone(),
+            camera_modes: modes,
             sink_flush_needed,
             tx_sink
-        }
+        })
+    }
+
+    pub async fn update_camera_mode(&mut self, mode_index: usize) -> Result<(), Box<dyn Error>> {
+        let mode = self.camera_modes.get(mode_index).ok_or("Invalid Mode Index")?;
+        self.cam_mode_tx.send(mode.clone()).await?;
+
+        Ok(())
+    }
+
+    pub fn camera_path(&self) -> &str {
+        &self.camera_path
+    }
+
+    pub fn current_mode(&self) -> &CameraMode {
+        &self.current_mode
+    }
+
+    pub fn camera_modes(&self) -> &[CameraMode] {
+        &self.camera_modes
     }
 
     async fn enroll_rx(&self) -> Receiver<Vec<u8>> {
@@ -205,5 +309,11 @@ impl CameraThreadHandle {
         self.sink_flush_needed.store(true, Ordering::SeqCst);
 
         rx
+    }
+}
+
+impl Drop for CameraThreadHandle {
+    fn drop(&mut self) {
+        self.manual_shutdown_needed.store(true, Ordering::SeqCst);
     }
 }

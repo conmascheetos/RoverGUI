@@ -25,7 +25,7 @@ function App() {
   // Fetch Camera(s) Information from Server
   useEffect(() => {
     (async () => {
-      let response = await fetch("/stream/available_cameras");
+      let response = await fetch("/stream/cameras");
       let cameras = await response.json();
 
       setCameras(["", ...cameras]);
@@ -65,21 +65,31 @@ function App() {
           return;
       connection.current = peerConnection;
 
-      let response = await fetch(`/stream/cameras/start`, {
+      let response = await fetch(`/stream/cameras/${encodeURIComponent(selectedCameraPath)}/start`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({
-          path: selectedCameraPath,
-          offer: peerConnection.localDescription
-        })
+        body: JSON.stringify(peerConnection.localDescription)
       });
-  
       let remoteOffer = await response.json();
       peerConnection.setRemoteDescription(new RTCSessionDescription(remoteOffer));
 
       setSelectedCamera(selectedCameraPath);
+
+      /* API Requests Example
+        // Get the current mode (ex. 1920x1080 @ 30fps)
+        let modeResponse = await fetch(`/stream/cameras/${encodeURIComponent(selectedCameraPath)}/modes/current`);
+        console.log(await modeResponse.text());
+
+        // Get the possible modes for the camera (ex. { 0: "1920x1080 @ 30fps", .. })
+        let modesResponse = await fetch(`/stream/cameras/${encodeURIComponent(selectedCameraPath)}/modes`);
+        console.log(await modesResponse.json());
+
+        // Set the current mode for the camera by the index found in the top api request
+        let setResponse = await fetch(`/stream/cameras/${encodeURIComponent(selectedCameraPath)}/modes/set/${1}`);
+        console.log(setResponse.status);
+      */
     };
 
     peerConnection.addTransceiver("video", {"direction": "sendrecv"})
