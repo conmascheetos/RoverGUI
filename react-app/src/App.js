@@ -77,6 +77,8 @@ function App() {
 
       setSelectedCamera(selectedCameraPath);
 
+      // IMPORTANT: Calls to the API should only run after this point.
+
       /* API Requests Example
         // Get the current mode (ex. 1920x1080 @ 30fps)
         let modeResponse = await fetch(`/stream/cameras/${encodeURIComponent(selectedCameraPath)}/modes/current`);

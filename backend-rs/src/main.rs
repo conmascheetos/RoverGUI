@@ -73,6 +73,8 @@ struct AppState {
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut available_camera_paths: Vec<PathBuf> = Vec::new();
 
+    // Only add cameras that are streamable with h264.
+    // available_camera_paths is only updated at initial start, however, this could be better changed to run when a camera is plugged in or removed.
     for node in v4l::context::enum_devices() {
         let mut device = Device::new(node.index())?;
         let Ok(modes) = CameraMode::fetch_all(&device) else {

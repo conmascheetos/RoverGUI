@@ -6,6 +6,7 @@ use rocket::tokio::{sync::{mpsc::{self, Receiver, Sender}, Mutex, Notify}, task,
 use v4l::{buffer::Type, frameinterval::{FrameIntervalEnum, Stepwise}, io::traits::CaptureStream, prelude::MmapStream, video::{capture::Parameters, Capture}, Device, Format, FourCC, Fraction};
 use webrtc::{api::{interceptor_registry, media_engine::{MediaEngine, MIME_TYPE_H264}, APIBuilder, API}, ice_transport::ice_connection_state::RTCIceConnectionState, interceptor::registry::Registry, media::Sample, peer_connection::{configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState, sdp::session_description::RTCSessionDescription}, rtp_transceiver::rtp_codec::RTCRtpCodecCapability, track::track_local::{track_local_static_sample::TrackLocalStaticSample, TrackLocal}};
 
+// Struct used for reading a camera's MJPG frames to H264 buffers.
 pub struct H264CameraReader<'a> {
     stream: MmapStream<'a>,
     camera_mode: CameraMode,
@@ -39,11 +40,12 @@ impl<'a> H264CameraReader<'a> {
     }
 }
 
+// CameraMode(s) are used for controlling what resolution and frame rate the H264CameraReader operates at.
 #[derive(Debug, Clone, Copy)]
 pub struct CameraMode {
     width: u32,
     height: u32,
-    frame_interval: Fraction
+    frame_interval: Fraction // 1/30 is 30 fps, 1/15 is 15fps, etc.
 }
 
 impl ToString for CameraMode {
@@ -53,6 +55,7 @@ impl ToString for CameraMode {
 }
 
 impl CameraMode {
+    // Fetch all possible CameraMode(s) of the Device camera.
     pub fn fetch_all(device: &Device) -> Result<Vec<CameraMode>, Box<dyn Error>> {
         let mut configs: Vec<CameraMode> = Vec::new();
         
@@ -76,6 +79,7 @@ impl CameraMode {
     }
 }
 
+// Handles communication between CameraThreadHandle(s) and WebRTC clients.
 pub struct WebcamManager {
     camera_handles: Arc<Mutex<Vec<CameraThreadHandle>>>,
     rtc_api: API
@@ -104,6 +108,7 @@ impl WebcamManager {
         self.camera_handles.clone()
     }
 
+    // IMPORTANT: Everything in here runs within the tokio runtime!
     pub async fn add_client(&self, camera_path: String, rtc_offer: RTCSessionDescription) -> Result<RTCSessionDescription, Box<dyn Error>> {
         let peer_connection = self.rtc_api.new_peer_connection(RTCConfiguration::default()).await?;
         let peer_connection = Arc::new(peer_connection);
@@ -124,6 +129,7 @@ impl WebcamManager {
             .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await?;
 
+        // Get a Receiver from the CameraThreadHandle thread. Additionally, create a CameraThreadHandle if one isn't active for the current path.
         let mut rx = {
             let camera_handles = &mut self.camera_handles.lock().await;
             match camera_handles.iter().find(|handle| handle.camera_path == camera_path) {
@@ -148,10 +154,12 @@ impl WebcamManager {
 
         let c_peer_disconnected = peer_disconnected.clone();
         task::spawn(async move {
+            // We must wait for the ice connection status state to be Connected before sending bytes to the WebRTC client.
             if time::timeout(Duration::from_millis(5000), notify_rx.notified()).await.is_err() {
                 return;
             }
 
+            // Read h264 bytes from the CameraThreadHandle using mpsc.
             while let Some(bytes) = rx.recv().await {
                 if c_peer_disconnected.load(Ordering::SeqCst) {
                     return;
@@ -160,7 +168,7 @@ impl WebcamManager {
                 video_track
                     .write_sample(&Sample {
                         data: bytes.into(),
-                        duration: Duration::from_millis(1000),
+                        duration: Duration::from_millis(20),
                         ..Default::default()
                     })
                 .await.unwrap();
@@ -192,6 +200,7 @@ impl WebcamManager {
             Box::pin(async {})
         }));
 
+        // WebRTC connection processes
         peer_connection.set_remote_description(rtc_offer).await?;
         let answer = peer_connection.create_answer(None).await?;
         let mut ice_gather_rx = peer_connection.gathering_complete_promise().await;
@@ -201,6 +210,17 @@ impl WebcamManager {
         Ok(peer_connection.local_description().await.ok_or("Failed to Generate Description")?)
     }
 }
+
+/*
+    How CameraThreadHandle Works:
+
+    This struct manages a "reader" thread that owns an H264CameraReader. Importantly, this struct sends WebRTC client Receivers
+    to the reader thread. The reader thread then constantly loops and reads H264 bytes from H264CameraReader and then iterates
+    through all the WebRTC client Receivers, sending each receiver a copy of the bytes read. If there aren't any more Receivers,
+    then the reader thread is dropped and CameraThreadHandle is removed from WebcamManager.
+
+    This could be thought of as an "event system" in which all the WebRTC clients on the tokio runtime receiver bytes from the reader thread.
+*/
 
 pub struct CameraThreadHandle {
     camera_path: String,
@@ -231,16 +251,18 @@ impl CameraThreadHandle {
             .find(|node| node.path() == device_path).ok_or("V4l Node Not Found")?;
         let mut device = Device::new(node.index())?;
         let modes = CameraMode::fetch_all(&device)?;
-        let initial_mode = modes.last().ok_or("No Last")?.clone();
+        let initial_mode = modes.last().ok_or("No Last")?.clone(); // The last camera mode tends to be the one with the best resolution and fps.
         thread::spawn(move || {
             let mut reader = H264CameraReader::new(&mut device, initial_mode).unwrap();
             let mut rtc_txs: Vec<Sender<Vec<u8>>> = Vec::new();
 
             loop {
+                // Shutdown due to drop of CameraThreadHandle
                 if c_manual_shutdown_needed.load(Ordering::SeqCst) {
                     return;
                 }
 
+                // Used to prevent having to constantly lock the c_tx_sink mutex.
                 if c_sink_flush_needed.load(Ordering::SeqCst) {
                     let tx_sink = &mut *c_tx_sink.blocking_lock();
 
@@ -312,6 +334,7 @@ impl CameraThreadHandle {
     }
 }
 
+// Signal the reader thread to stop running after drop.
 impl Drop for CameraThreadHandle {
     fn drop(&mut self) {
         self.manual_shutdown_needed.store(true, Ordering::SeqCst);
