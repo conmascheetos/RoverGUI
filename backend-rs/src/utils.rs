@@ -1,16 +1,56 @@
-use std::{error::Error, path::Path, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread::{self}, time::Duration};
+use std::{
+    error::Error,
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread::{self},
+    time::Duration,
+};
 
 use jpeg_decoder::Decoder;
-use openh264::{encoder::Encoder, formats::{RgbSliceU8, YUVBuffer}};
-use rocket::tokio::{sync::{mpsc::{self, Receiver, Sender}, Mutex, Notify}, task, time};
-use v4l::{buffer::Type, frameinterval::{FrameIntervalEnum, Stepwise}, io::traits::CaptureStream, prelude::MmapStream, video::{capture::Parameters, Capture}, Device, Format, FourCC, Fraction};
-use webrtc::{api::{interceptor_registry, media_engine::{MediaEngine, MIME_TYPE_H264}, APIBuilder, API}, ice_transport::ice_connection_state::RTCIceConnectionState, interceptor::registry::Registry, media::Sample, peer_connection::{configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState, sdp::session_description::RTCSessionDescription}, rtp_transceiver::rtp_codec::RTCRtpCodecCapability, track::track_local::{track_local_static_sample::TrackLocalStaticSample, TrackLocal}};
+use openh264::{
+    encoder::Encoder,
+    formats::{RgbSliceU8, YUVBuffer},
+};
+use rocket::tokio::{
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        Mutex, Notify,
+    },
+    task, time,
+};
+use v4l::{
+    buffer::Type,
+    frameinterval::{FrameIntervalEnum, Stepwise},
+    io::traits::CaptureStream,
+    prelude::MmapStream,
+    video::{capture::Parameters, Capture},
+    Device, Format, FourCC, Fraction,
+};
+use webrtc::{
+    api::{
+        interceptor_registry,
+        media_engine::{MediaEngine, MIME_TYPE_H264},
+        APIBuilder, API,
+    },
+    ice_transport::ice_connection_state::RTCIceConnectionState,
+    interceptor::registry::Registry,
+    media::Sample,
+    peer_connection::{
+        configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState,
+        sdp::session_description::RTCSessionDescription,
+    },
+    rtp_transceiver::rtp_codec::RTCRtpCodecCapability,
+    track::track_local::{track_local_static_sample::TrackLocalStaticSample, TrackLocal},
+};
 
 // Struct used for reading a camera's MJPG frames to H264 buffers.
 pub struct H264CameraReader<'a> {
     stream: MmapStream<'a>,
     camera_mode: CameraMode,
-    h264_encoder: Encoder
+    h264_encoder: Encoder,
 }
 
 // Heavily inspired by https://github.com/D1plo1d/h264_webcam_stream
@@ -25,15 +65,25 @@ impl<'a> H264CameraReader<'a> {
         let stream = MmapStream::with_buffers(device, Type::VideoCapture, 4)?;
         let encoder = Encoder::new()?;
 
-        Ok(Self { stream, camera_mode: mode, h264_encoder: encoder })
+        Ok(Self {
+            stream,
+            camera_mode: mode,
+            h264_encoder: encoder,
+        })
     }
 
     pub fn read(&mut self) -> Result<Vec<u8>, Box<dyn Error>> {
-        let (buffer, _) = self.stream.next()?; 
+        let (buffer, _) = self.stream.next()?;
         let mut jpg = Decoder::new(buffer);
         let pixels = jpg.decode()?;
 
-        let yuv_buffer = YUVBuffer::from_rgb_source(RgbSliceU8::new(&pixels[..], (self.camera_mode.width as usize, self.camera_mode.height as usize)));
+        let yuv_buffer = YUVBuffer::from_rgb_source(RgbSliceU8::new(
+            &pixels[..],
+            (
+                self.camera_mode.width as usize,
+                self.camera_mode.height as usize,
+            ),
+        ));
         let bitstream = self.h264_encoder.encode(&yuv_buffer)?;
 
         Ok(bitstream.to_vec())
@@ -45,12 +95,15 @@ impl<'a> H264CameraReader<'a> {
 pub struct CameraMode {
     width: u32,
     height: u32,
-    frame_interval: Fraction // 1/30 is 30 fps, 1/15 is 15fps, etc.
+    frame_interval: Fraction, // 1/30 is 30 fps, 1/15 is 15fps, etc.
 }
 
 impl ToString for CameraMode {
     fn to_string(&self) -> String {
-        format!("{}x{} @{}fps", self.width, self.height, self.frame_interval.denominator)
+        format!(
+            "{}x{} @{}fps",
+            self.width, self.height, self.frame_interval.denominator
+        )
     }
 }
 
@@ -58,20 +111,28 @@ impl CameraMode {
     // Fetch all possible CameraMode(s) of the Device camera.
     pub fn fetch_all(device: &Device) -> Result<Vec<CameraMode>, Box<dyn Error>> {
         let mut configs: Vec<CameraMode> = Vec::new();
-        
+
         let discrete_iter = Capture::enum_framesizes(device, FourCC::new(b"MJPG"))?
             .into_iter()
-            .map(|framesize| framesize.size.to_discrete())
-            .flatten();
+            .flat_map(|framesize| framesize.size.to_discrete());
 
         for discrete_frame_size in discrete_iter {
-            for interval in Capture::enum_frameintervals(device, FourCC::new(b"MJPG"), discrete_frame_size.width, discrete_frame_size.height)? {
+            for interval in Capture::enum_frameintervals(
+                device,
+                FourCC::new(b"MJPG"),
+                discrete_frame_size.width,
+                discrete_frame_size.height,
+            )? {
                 let fraction = match interval.interval {
                     FrameIntervalEnum::Discrete(fraction) => fraction,
-                    FrameIntervalEnum::Stepwise(Stepwise { min, .. }) => min
+                    FrameIntervalEnum::Stepwise(Stepwise { min, .. }) => min,
                 };
 
-                configs.push(CameraMode { width: discrete_frame_size.width, height: discrete_frame_size.height, frame_interval: fraction });
+                configs.push(CameraMode {
+                    width: discrete_frame_size.width,
+                    height: discrete_frame_size.height,
+                    frame_interval: fraction,
+                });
             }
         }
 
@@ -82,7 +143,7 @@ impl CameraMode {
 // Handles communication between CameraThreadHandle(s) and WebRTC clients.
 pub struct WebcamManager {
     camera_handles: Arc<Mutex<Vec<CameraThreadHandle>>>,
-    rtc_api: API
+    rtc_api: API,
 }
 
 impl WebcamManager {
@@ -91,7 +152,8 @@ impl WebcamManager {
         media_engine.register_default_codecs()?;
 
         let mut registry = Registry::new();
-        registry = interceptor_registry::register_default_interceptors(registry, &mut media_engine)?;
+        registry =
+            interceptor_registry::register_default_interceptors(registry, &mut media_engine)?;
 
         let rtc_api = APIBuilder::new()
             .with_media_engine(media_engine)
@@ -100,7 +162,7 @@ impl WebcamManager {
 
         Ok(Self {
             camera_handles: Arc::new(Mutex::new(Vec::new())),
-            rtc_api
+            rtc_api,
         })
     }
 
@@ -109,8 +171,15 @@ impl WebcamManager {
     }
 
     // IMPORTANT: Everything in here runs within the tokio runtime!
-    pub async fn add_client(&self, camera_path: String, rtc_offer: RTCSessionDescription) -> Result<RTCSessionDescription, Box<dyn Error>> {
-        let peer_connection = self.rtc_api.new_peer_connection(RTCConfiguration::default()).await?;
+    pub async fn add_client(
+        &self,
+        camera_path: String,
+        rtc_offer: RTCSessionDescription,
+    ) -> Result<RTCSessionDescription, Box<dyn Error>> {
+        let peer_connection = self
+            .rtc_api
+            .new_peer_connection(RTCConfiguration::default())
+            .await?;
         let peer_connection = Arc::new(peer_connection);
         let peer_disconnected = Arc::new(AtomicBool::new(false));
         let notify_tx = Arc::new(Notify::new());
@@ -132,17 +201,22 @@ impl WebcamManager {
         // Get a Receiver from the CameraThreadHandle thread. Additionally, create a CameraThreadHandle if one isn't active for the current path.
         let mut rx = {
             let camera_handles = &mut self.camera_handles.lock().await;
-            match camera_handles.iter().find(|handle| handle.camera_path == camera_path) {
-                Some(handle) => {
-                    handle.enroll_rx().await
-                },
+            match camera_handles
+                .iter()
+                .find(|handle| handle.camera_path == camera_path)
+            {
+                Some(handle) => handle.enroll_rx().await,
                 None => {
-                    let handle = CameraThreadHandle::start_camera_thread(&camera_path, self.camera_handles.clone()).unwrap();
+                    let handle = CameraThreadHandle::start_camera_thread(
+                        &camera_path,
+                        self.camera_handles.clone(),
+                    )
+                    .unwrap();
                     let rx = handle.enroll_rx().await;
-                    
+
                     camera_handles.push(handle);
                     rx
-                },
+                }
             }
         };
 
@@ -153,15 +227,20 @@ impl WebcamManager {
         });
 
         let c_peer_disconnected = peer_disconnected.clone();
+        let c_peer_connection = peer_connection.clone();
         task::spawn(async move {
             // We must wait for the ice connection status state to be Connected before sending bytes to the WebRTC client.
-            if time::timeout(Duration::from_millis(5000), notify_rx.notified()).await.is_err() {
+            if time::timeout(Duration::from_millis(5000), notify_rx.notified())
+                .await
+                .is_err()
+            {
                 return;
             }
 
             // Read h264 bytes from the CameraThreadHandle using mpsc.
             while let Some(bytes) = rx.recv().await {
                 if c_peer_disconnected.load(Ordering::SeqCst) {
+                    let _ = c_peer_connection.close().await;
                     return;
                 }
 
@@ -171,34 +250,30 @@ impl WebcamManager {
                         duration: Duration::from_millis(20),
                         ..Default::default()
                     })
-                .await.unwrap();
+                    .await
+                    .unwrap();
             }
         });
 
         peer_connection.on_ice_connection_state_change(Box::new(
             move |connection_state: RTCIceConnectionState| {
-                match connection_state {
-                    RTCIceConnectionState::Connected => {
-                        notify_tx.notify_waiters();
-                    },
-                    _ => {}
+                if connection_state == RTCIceConnectionState::Connected {
+                    notify_tx.notify_waiters();
                 }
-                Box::pin(async {  })
+
+                Box::pin(async {})
             },
         ));
 
-        let c_peer_connection = peer_connection.clone();
-        peer_connection.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
-            match state {
-                RTCPeerConnectionState::Disconnected => {
-                    let _ = c_peer_connection.close();
+        peer_connection.on_peer_connection_state_change(Box::new(
+            move |state: RTCPeerConnectionState| {
+                if state == RTCPeerConnectionState::Disconnected {
                     peer_disconnected.store(true, Ordering::SeqCst);
-                },
-                _ => {}
-            }
+                }
 
-            Box::pin(async {})
-        }));
+                Box::pin(async {})
+            },
+        ));
 
         // WebRTC connection processes
         peer_connection.set_remote_description(rtc_offer).await?;
@@ -207,7 +282,10 @@ impl WebcamManager {
         peer_connection.set_local_description(answer).await?;
         ice_gather_rx.recv().await;
 
-        Ok(peer_connection.local_description().await.ok_or("Failed to Generate Description")?)
+        Ok(peer_connection
+            .local_description()
+            .await
+            .ok_or("Failed to Generate Description")?)
     }
 }
 
@@ -229,11 +307,14 @@ pub struct CameraThreadHandle {
     camera_modes: Vec<CameraMode>,
     manual_shutdown_needed: Arc<AtomicBool>,
     sink_flush_needed: Arc<AtomicBool>,
-    tx_sink: Arc<Mutex<Vec<Sender<Vec<u8>>>>>
+    tx_sink: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
 }
 
 impl CameraThreadHandle {
-    fn start_camera_thread(camera_path: &str, camera_handles: Arc<Mutex<Vec<CameraThreadHandle>>>) -> Result<Self, Box<dyn Error>> {
+    fn start_camera_thread(
+        camera_path: &str,
+        camera_handles: Arc<Mutex<Vec<CameraThreadHandle>>>,
+    ) -> Result<Self, Box<dyn Error>> {
         let camera_path = camera_path.to_owned();
         let (cam_mode_tx, mut cam_mode_rx) = mpsc::channel::<CameraMode>(1);
         let manual_shutdown_needed: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
@@ -248,10 +329,11 @@ impl CameraThreadHandle {
         let device_path = Path::new(&c_camera_path);
         let node = v4l::context::enum_devices()
             .into_iter()
-            .find(|node| node.path() == device_path).ok_or("V4l Node Not Found")?;
+            .find(|node| node.path() == device_path)
+            .ok_or("V4l Node Not Found")?;
         let mut device = Device::new(node.index())?;
         let modes = CameraMode::fetch_all(&device)?;
-        let initial_mode = modes.last().ok_or("No Last")?.clone(); // The last camera mode tends to be the one with the best resolution and fps.
+        let initial_mode = *modes.last().ok_or("No Last")?; // The last camera mode tends to be the one with the best resolution and fps.
         thread::spawn(move || {
             let mut reader = H264CameraReader::new(&mut device, initial_mode).unwrap();
             let mut rtc_txs: Vec<Sender<Vec<u8>>> = Vec::new();
@@ -280,11 +362,11 @@ impl CameraThreadHandle {
                 }
 
                 let bytes = reader.read().unwrap();
-                rtc_txs.retain(|tx| {
-                    tx.blocking_send(bytes.clone()).is_ok()
-                });
+                rtc_txs.retain(|tx| tx.blocking_send(bytes.clone()).is_ok());
 
-                if rtc_txs.len() == 0 {
+                println!("RTC TX Count: {}", rtc_txs.len());
+
+                if rtc_txs.is_empty() {
                     let camera_handles = &mut *camera_handles.blocking_lock();
                     camera_handles.retain(|handle| handle.camera_path != c_camera_path);
 
@@ -297,16 +379,19 @@ impl CameraThreadHandle {
             camera_path,
             manual_shutdown_needed,
             cam_mode_tx,
-            current_mode: modes.last().ok_or("No Last Mode")?.clone(),
+            current_mode: *modes.last().ok_or("No Last Mode")?,
             camera_modes: modes,
             sink_flush_needed,
-            tx_sink
+            tx_sink,
         })
     }
 
     pub async fn update_camera_mode(&mut self, mode_index: usize) -> Result<(), Box<dyn Error>> {
-        let mode = self.camera_modes.get(mode_index).ok_or("Invalid Mode Index")?;
-        self.cam_mode_tx.send(mode.clone()).await?;
+        let mode = self
+            .camera_modes
+            .get(mode_index)
+            .ok_or("Invalid Mode Index")?;
+        self.cam_mode_tx.send(*mode).await?;
 
         Ok(())
     }
