@@ -109,7 +109,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let Ok(modes) = CameraMode::fetch_all(&device) else {
             continue;
         };
-        let initial_mode = *modes.first().ok_or("No Available Modes")?;
+        let initial_mode = *modes.first().ok_or("Error Creating a CameraThreadHandle: Failed to initialize camera as no valid Camera operating modes were provided by video4linux. (Check the camera as this was an OS-level issue!)")?;
 
         // If can't query or create a stream, then it can't be displayed.
         if H264CameraReader::new(&mut device, initial_mode).is_ok() {

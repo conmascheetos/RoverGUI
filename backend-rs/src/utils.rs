@@ -98,9 +98,10 @@ pub struct CameraMode {
     frame_interval: Fraction, // 1/30 is 30 fps, 1/15 is 15fps, etc.
 }
 
-impl ToString for CameraMode {
-    fn to_string(&self) -> String {
-        format!(
+impl core::fmt::Display for CameraMode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
             "{}x{} @{}fps",
             self.width, self.height, self.frame_interval.denominator
         )
@@ -140,7 +141,7 @@ impl CameraMode {
     }
 }
 
-// Handles communication between CameraThreadHandle(s) and WebRTC clients.
+/// Handles communication between CameraThreadHandle(s) and WebRTC clients.
 pub struct WebcamManager {
     camera_handles: Arc<Mutex<Vec<CameraThreadHandle>>>,
     rtc_api: API,
@@ -170,7 +171,10 @@ impl WebcamManager {
         self.camera_handles.clone()
     }
 
-    // IMPORTANT: Everything in here runs within the tokio runtime!
+    /// Add a WebRTC "Client". A client in this sense is simply a WebRTC Connection created from an RTC Offer or [`RTCSessionDescription`].
+    /// This connection serves an H264 encoded stream from the corresponding camera to the `camera_path` argument. "Client" is just used here
+    /// to describe the connection itself and all its respective mpsc channels and tokio tasks needed to serve the required stream.
+    /// **IMPORTANT: Everything in here (within the client) runs within the tokio runtime!**
     pub async fn add_client(
         &self,
         camera_path: String,
@@ -190,6 +194,8 @@ impl WebcamManager {
                 mime_type: MIME_TYPE_H264.to_owned(),
                 ..Default::default()
             },
+            // These are arbitrary values. I'm sure that in WebRTC scenarios that require more defined control, the id and stream_id would be important.
+            // However, this is not the case as we are simply serving a video stream!
             "video".to_owned(),
             "webrtc".to_owned(),
         ));
@@ -333,17 +339,13 @@ impl CameraThreadHandle {
             .ok_or("V4l Node Not Found")?;
         let mut device = Device::new(node.index())?;
         let modes = CameraMode::fetch_all(&device)?;
-        let initial_mode = *modes.last().ok_or("No Last")?; // The last camera mode tends to be the one with the best resolution and fps.
+        let initial_mode = *modes.last().ok_or("Error Creating a CameraThreadHandle: Failed to initialize camera as no valid Camera operating modes were provided by video4linux. (Check the camera as this was an OS-level issue!)")?; // The last camera mode tends to be the one with the best resolution and fps.
         thread::spawn(move || {
             let mut reader = H264CameraReader::new(&mut device, initial_mode).unwrap();
             let mut rtc_txs: Vec<Sender<Vec<u8>>> = Vec::new();
 
-            loop {
-                // Shutdown due to drop of CameraThreadHandle
-                if c_manual_shutdown_needed.load(Ordering::SeqCst) {
-                    return;
-                }
-
+            // Run until the CameraThreadHandle has been dropped from memory.
+            while !c_manual_shutdown_needed.load(Ordering::SeqCst) {
                 // Used to prevent having to constantly lock the c_tx_sink mutex.
                 if c_sink_flush_needed.load(Ordering::SeqCst) {
                     let tx_sink = &mut *c_tx_sink.blocking_lock();
@@ -364,8 +366,6 @@ impl CameraThreadHandle {
                 let bytes = reader.read().unwrap();
                 rtc_txs.retain(|tx| tx.blocking_send(bytes.clone()).is_ok());
 
-                println!("RTC TX Count: {}", rtc_txs.len());
-
                 if rtc_txs.is_empty() {
                     let camera_handles = &mut *camera_handles.blocking_lock();
                     camera_handles.retain(|handle| handle.camera_path != c_camera_path);
@@ -379,7 +379,9 @@ impl CameraThreadHandle {
             camera_path,
             manual_shutdown_needed,
             cam_mode_tx,
-            current_mode: *modes.last().ok_or("No Last Mode")?,
+            current_mode: *modes
+                .last()
+                .ok_or("Error Creating a CameraThreadHandle: Failed to initialize camera as no valid Camera operating modes were provided by video4linux. (Check the camera as this was an OS-level issue!)")?,
             camera_modes: modes,
             sink_flush_needed,
             tx_sink,
